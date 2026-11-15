@@ -58,8 +58,9 @@ func (r *roomRepository) FindByID(ctx context.Context, id int) (model.Room, erro
 
 func (r *roomRepository) Create(ctx context.Context, req model.RoomRequest) (model.Room, error) {
 	return scanRoom(r.db.QueryRow(ctx,
-		`INSERT INTO rooms (code, name, building, capacity) VALUES ($1, $2, $3, $4) RETURNING `+roomColumns,
-		req.Code, req.Name, req.Building, req.Capacity))
+		`INSERT INTO rooms (code, name, building, capacity, is_active)
+         VALUES ($1, $2, $3, $4, COALESCE($5, TRUE)) RETURNING `+roomColumns,
+		req.Code, req.Name, req.Building, req.Capacity, req.IsActive))
 }
 
 func (r *roomRepository) Update(ctx context.Context, id int, req model.RoomRequest) (model.Room, error) {
