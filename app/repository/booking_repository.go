@@ -38,6 +38,15 @@ type BookingRepository interface {
 	// ErrItemUnavailable bila stok kurang.
 	LockAndCheckItems(ctx context.Context, tx DBTX, items []model.BookingItem,
 		start, end time.Time) error
+
+	// FindApprovedByRoom mengembalikan booking approved untuk satu ruang
+	// pada rentang waktu tertentu. Untuk jadwal per hari:
+	// from = awal hari, to = from.Add(24*time.Hour).
+	FindApprovedByRoom(ctx context.Context, roomID int, from, to time.Time) ([]model.Booking, error)
+
+	// WithTx menjalankan fn dalam satu transaksi database. Alias dari
+	// TxManager.WithTx, disediakan untuk kompatibilitas kode service 4b.
+	WithTx(ctx context.Context, fn func(ctx context.Context, tx DBTX) error) error
 }
 
 type bookingRepository struct {
@@ -48,7 +57,7 @@ func NewBookingRepository(pool *pgxpool.Pool) BookingRepository {
 	return &bookingRepository{pool: pool}
 }
 
-//  Create
+// ---------------------------------------------------------------- Create
 
 func (r *bookingRepository) Create(ctx context.Context, tx DBTX, b *model.Booking) (*model.Booking, error) {
 	const q = `
@@ -79,7 +88,7 @@ func (r *bookingRepository) Create(ctx context.Context, tx DBTX, b *model.Bookin
 	return b, nil
 }
 
-//  FindByID
+// ------------------------------------------------------------- FindByID
 
 func (r *bookingRepository) FindByID(ctx context.Context, id int) (*model.Booking, error) {
 	const q = `
@@ -104,7 +113,7 @@ func (r *bookingRepository) FindByID(ctx context.Context, id int) (*model.Bookin
 	return &b, nil
 }
 
-//  UpdateStatus
+// ---------------------------------------------------------- UpdateStatus
 
 func (r *bookingRepository) UpdateStatus(ctx context.Context, tx DBTX, id int,
 	status model.BookingStatus, reviewedBy *int, note *string, returnedAt *time.Time) error {
@@ -127,7 +136,7 @@ func (r *bookingRepository) UpdateStatus(ctx context.Context, tx DBTX, id int,
 	return nil
 }
 
-//  ListByUser
+// ------------------------------------------------------------ ListByUser
 
 func (r *bookingRepository) ListByUser(ctx context.Context, userID int) ([]model.Booking, error) {
 	const q = `
@@ -139,7 +148,7 @@ func (r *bookingRepository) ListByUser(ctx context.Context, userID int) ([]model
 	return r.list(ctx, q, userID)
 }
 
-//  ListAll
+// --------------------------------------------------------------- ListAll
 
 func (r *bookingRepository) ListAll(ctx context.Context, status *model.BookingStatus) ([]model.Booking, error) {
 	if status != nil {
@@ -158,7 +167,7 @@ func (r *bookingRepository) ListAll(ctx context.Context, status *model.BookingSt
 	return r.list(ctx, q)
 }
 
-//  CountActiveByUser
+// --------------------------------------------------- CountActiveByUser
 
 func (r *bookingRepository) CountActiveByUser(ctx context.Context, userID int) (int, error) {
 	const q = `
@@ -170,7 +179,8 @@ func (r *bookingRepository) CountActiveByUser(ctx context.Context, userID int) (
 	return n, err
 }
 
-//  LockAndCheckItems
+// ------------------------------------------------- LockAndCheckItems
+
 func (r *bookingRepository) LockAndCheckItems(ctx context.Context, tx DBTX,
 	items []model.BookingItem, start, end time.Time) error {
 
@@ -203,7 +213,37 @@ func (r *bookingRepository) LockAndCheckItems(ctx context.Context, tx DBTX,
 	return nil
 }
 
-//  internal
+// ------------------------------------------------ FindApprovedByRoom
+
+func (r *bookingRepository) FindApprovedByRoom(ctx context.Context, roomID int, from, to time.Time) ([]model.Booking, error) {
+	const q = `
+		SELECT id, user_id, room_id, purpose, start_at, end_at, status,
+		       reviewed_by, review_note, returned_at, created_at
+		FROM bookings
+		WHERE room_id = $1
+		  AND status = 'approved'
+		  AND tstzrange(start_at, end_at, '[)') && tstzrange($2, $3, '[)')
+		ORDER BY start_at`
+
+	return r.list(ctx, q, roomID, from, to)
+}
+
+// ------------------------------------------------------------ WithTx
+
+func (r *bookingRepository) WithTx(ctx context.Context, fn func(ctx context.Context, tx DBTX) error) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ---------------------------------------------------------------- internal
 
 func (r *bookingRepository) list(ctx context.Context, q string, args ...any) ([]model.Booking, error) {
 	rows, err := r.pool.Query(ctx, q, args...)
