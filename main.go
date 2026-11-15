@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Reverseflash45/sipinjam-lab/app/repository"
+	"github.com/Reverseflash45/sipinjam-lab/app/service"
 	"github.com/Reverseflash45/sipinjam-lab/config"
 	"github.com/Reverseflash45/sipinjam-lab/database"
 	"github.com/Reverseflash45/sipinjam-lab/route"
@@ -32,7 +34,19 @@ func main() {
 	}
 	defer pool.Close()
 
-	app := config.NewApp(logger, route.Dependencies{Pool: pool})
+	// --- Perakitan dependency: repository -> service ---
+	userRepo := repository.NewUserRepository(pool)
+	authService := service.NewAuthService(
+		userRepo,
+		config.GetEnv("JWT_SECRET", ""),
+		time.Duration(config.GetEnvInt("JWT_TTL_MINUTES", 60))*time.Minute,
+	)
+
+	app := config.NewApp(logger, route.Dependencies{
+		Pool:        pool,
+		AuthService: authService,
+		JWTSecret:   config.GetEnv("JWT_SECRET", ""),
+	})
 
 	go func() {
 		port := config.GetEnv("APP_PORT", "3000")
