@@ -70,8 +70,9 @@ func (r *itemRepository) FindByID(ctx context.Context, id int) (model.Item, erro
 
 func (r *itemRepository) Create(ctx context.Context, req model.ItemRequest) (model.Item, error) {
 	return scanItem(r.db.QueryRow(ctx,
-		`INSERT INTO items (code, name, category, stock) VALUES ($1, $2, $3, $4) RETURNING `+itemColumns,
-		req.Code, req.Name, req.Category, req.Stock))
+		`INSERT INTO items (code, name, category, stock, is_active)
+         VALUES ($1, $2, $3, $4, COALESCE($5, TRUE)) RETURNING `+itemColumns,
+		req.Code, req.Name, req.Category, *req.Stock, req.IsActive))
 }
 
 func (r *itemRepository) Update(ctx context.Context, id int, req model.ItemRequest) (model.Item, error) {
@@ -79,9 +80,12 @@ func (r *itemRepository) Update(ctx context.Context, id int, req model.ItemReque
 		`UPDATE items SET code = $2, name = $3, category = $4, stock = $5,
 		        is_active = COALESCE($6, is_active)
 		 WHERE id = $1 RETURNING `+itemColumns,
-		id, req.Code, req.Name, req.Category, req.Stock, req.IsActive))
+		id, req.Code, req.Name, req.Category, *req.Stock, req.IsActive))
 }
 
+// LockForUpdate wajib dipanggil melalui repository hasil WithTx(tx)
+// ketika transaksi masih aktif. Pemanggilan melalui pool langsung
+// akan melepaskan lock setelah statement selesai.
 func (r *itemRepository) LockForUpdate(ctx context.Context, ids []int) error {
 	_, err := r.db.Exec(ctx, `SELECT id FROM items WHERE id = ANY($1) ORDER BY id FOR UPDATE`, ids)
 	return err
