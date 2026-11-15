@@ -20,6 +20,7 @@ var (
 	ErrNotFound     = errors.New("data tidak ditemukan")
 	ErrDuplicate    = errors.New("data sudah ada")
 	ErrRoomConflict = errors.New("ruang sudah dipinjam pada waktu tersebut")
+	ErrItemUnavailable = errors.New("stok alat tidak mencukupi") 
 )
 
 // pgCode mengembalikan kode error PostgreSQL, misalnya 23505 untuk UNIQUE.
