@@ -14,8 +14,8 @@ const (
 // AuthUser adalah identitas minimal yang disimpan middleware RequireAuth
 // ke Fiber Locals: user_id dan role.
 type AuthUser struct {
-	ID   int  `json:"id"`
-	Role Role `json:"role"`
+	UserID int  `json:"id"`
+	Role   Role `json:"role"`
 }
 
 // IsStaff mengembalikan true untuk admin dan laboran — dua role yang

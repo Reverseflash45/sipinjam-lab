@@ -16,16 +16,21 @@ func GetAuthUser(c *fiber.Ctx) (model.AuthUser, bool) {
 	}
 
 	role, _ := c.Locals("role").(string)
-	return model.AuthUser{ID: id, Role: model.Role(role)}, true
+	return model.AuthUser{UserID: id, Role: model.Role(role)}, true
 }
 
 // MustAuthUser sama seperti GetAuthUser tetapi mengembalikan AppError 401
-// bila identitas tidak tersedia. Dipakai di service yang sudah pasti
-// melewati middleware RequireAuth, supaya kode tidak perlu if-check berulang.
+// bila identitas tidak tersedia.
 func MustAuthUser(c *fiber.Ctx) (model.AuthUser, error) {
 	u, ok := GetAuthUser(c)
 	if !ok {
 		return model.AuthUser{}, Unauthorized("sesi tidak valid")
 	}
 	return u, nil
+}
+
+// CurrentUser alias MustAuthUser, disediakan untuk kompatibilitas
+// dengan kode service yang memakai helper.CurrentUser(c).
+func CurrentUser(c *fiber.Ctx) (model.AuthUser, error) {
+	return MustAuthUser(c)
 }
