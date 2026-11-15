@@ -1,6 +1,8 @@
 package service
 
 import (
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/Reverseflash45/sipinjam-lab/app/model"
@@ -9,11 +11,12 @@ import (
 )
 
 type RoomService struct {
-	rooms repository.RoomRepository
+	rooms    repository.RoomRepository
+	bookings repository.BookingRepository
 }
 
-func NewRoomService(rooms repository.RoomRepository) *RoomService {
-	return &RoomService{rooms: rooms}
+func NewRoomService(rooms repository.RoomRepository, bookings repository.BookingRepository) *RoomService {
+	return &RoomService{rooms: rooms, bookings: bookings}
 }
 
 // GET /api/v1/rooms
@@ -42,6 +45,31 @@ func (s *RoomService) Get(c *fiber.Ctx) error {
 		return translate(err)
 	}
 	return helper.Success(c, fiber.StatusOK, "ruang ditemukan", room)
+}
+
+// GET /api/v1/rooms/:id/schedule?date=2026-11-20
+// Jadwal yang sudah disetujui pada satu hari, untuk membantu peminjam
+// memilih jam yang masih kosong.
+func (s *RoomService) Schedule(c *fiber.Ctx) error {
+	ctx, cancel := helper.RequestContext(c)
+	defer cancel()
+
+	id, ok := helper.ParamID(c)
+	if !ok {
+		return helper.BadRequest("id harus berupa angka positif")
+	}
+	day, err := time.ParseInLocation("2006-01-02", c.Query("date", time.Now().Format("2006-01-02")), time.Local)
+	if err != nil {
+		return helper.BadRequest("format date harus YYYY-MM-DD")
+	}
+	if _, err := s.rooms.FindByID(ctx, id); err != nil {
+		return translate(err)
+	}
+	list, err := s.bookings.FindApprovedByRoom(ctx, id, day, day.AddDate(0, 0, 1))
+	if err != nil {
+		return translate(err)
+	}
+	return helper.Success(c, fiber.StatusOK, "jadwal ruang berhasil diambil", list)
 }
 
 // POST /api/v1/rooms (admin)
