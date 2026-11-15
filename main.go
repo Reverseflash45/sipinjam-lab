@@ -19,6 +19,12 @@ func main() {
 	config.LoadEnv()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	jwtSecret := config.GetEnv("JWT_SECRET", "")
+	if len(jwtSecret) < 32 {
+		logger.Error("JWT_SECRET wajib diisi minimal 32 karakter")
+		os.Exit(1)
+	}
+
 	pool, err := database.NewPostgres(database.PostgresConfig{
 		Host:     config.GetEnv("DB_HOST", "localhost"),
 		Port:     config.GetEnv("DB_PORT", "5432"),
@@ -36,16 +42,24 @@ func main() {
 
 	// --- Perakitan dependency: repository -> service ---
 	userRepo := repository.NewUserRepository(pool)
+	roomRepo := repository.NewRoomRepository(pool)
+	itemRepo := repository.NewItemRepository(pool)
+	bookingRepo := repository.NewBookingRepository(pool)
+	txm := repository.NewTxManager(pool)
+
 	authService := service.NewAuthService(
 		userRepo,
-		config.GetEnv("JWT_SECRET", ""),
+		jwtSecret,
 		time.Duration(config.GetEnvInt("JWT_TTL_MINUTES", 60))*time.Minute,
 	)
 
 	app := config.NewApp(logger, route.Dependencies{
-		Pool:        pool,
-		AuthService: authService,
-		JWTSecret:   config.GetEnv("JWT_SECRET", ""),
+		Pool:           pool,
+		AuthService:    authService,
+		JWTSecret:      jwtSecret,
+		RoomService:    service.NewRoomService(roomRepo, bookingRepo),
+		ItemService:    service.NewItemService(itemRepo),
+		BookingService: service.NewBookingService(bookingRepo, roomRepo, itemRepo, txm),
 	})
 
 	go func() {
