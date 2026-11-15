@@ -19,6 +19,9 @@ type BookingRepository interface {
 	// FindByID mengambil booking beserta items. Tidak butuh transaksi.
 	FindByID(ctx context.Context, id int) (*model.Booking, error)
 
+	// FindByIDForUpdate mengambil booking beserta items dan mengunci barisnya.
+	FindByIDForUpdate(ctx context.Context, tx DBTX, id int) (*model.Booking, error)
+
 	// UpdateStatus mengubah status booking (dipakai approve/reject/return/cancel).
 	UpdateStatus(ctx context.Context, tx DBTX, id int, status model.BookingStatus,
 		reviewedBy *int, note *string, returnedAt *time.Time) error
@@ -110,6 +113,42 @@ func (r *bookingRepository) FindByID(ctx context.Context, id int) (*model.Bookin
 	if err := r.loadItems(ctx, &b); err != nil {
 		return nil, err
 	}
+	return &b, nil
+}
+
+// ------------------------------------------------------ FindByIDForUpdate
+
+// FindByIDForUpdate mengambil booking dan mengunci barisnya
+// sampai transaksi selesai.
+func (r *bookingRepository) FindByIDForUpdate(
+	ctx context.Context,
+	tx DBTX,
+	id int,
+) (*model.Booking, error) {
+	const q = `
+		SELECT id, user_id, room_id, purpose, start_at, end_at, status,
+		       reviewed_by, review_note, returned_at, created_at
+		FROM bookings
+		WHERE id = $1
+		FOR UPDATE`
+
+	var b model.Booking
+	err := tx.QueryRow(ctx, q, id).Scan(
+		&b.ID, &b.UserID, &b.RoomID, &b.Purpose,
+		&b.StartAt, &b.EndAt, &b.Status,
+		&b.ReviewedBy, &b.ReviewNote, &b.ReturnedAt, &b.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if err := r.loadItems(ctx, &b); err != nil {
+		return nil, err
+	}
+
 	return &b, nil
 }
 

@@ -17,21 +17,30 @@ type BookingService struct {
 	bookings repository.BookingRepository
 	rooms    repository.RoomRepository
 	items    repository.ItemRepository
-	tx       *repository.TxManager
+	tx       repository.TxManager
 }
 
-func NewBookingService(bookings repository.BookingRepository, rooms repository.RoomRepository,
-	items repository.ItemRepository, tx *repository.TxManager) *BookingService {
-	return &BookingService{bookings: bookings, rooms: rooms, items: items, tx: tx}
+func NewBookingService(
+	bookings repository.BookingRepository,
+	rooms repository.RoomRepository,
+	items repository.ItemRepository,
+	tx repository.TxManager,
+) *BookingService {
+	return &BookingService{
+		bookings: bookings,
+		rooms:    rooms,
+		items:    items,
+		tx:       tx,
+	}
 }
 
-// POST /api/v1/bookings (mahasiswa, dosen)
+// POST /api/v1/bookings
 func (s *BookingService) Create(c *fiber.Ctx) error {
 	ctx, cancel := helper.RequestContext(c)
 	defer cancel()
 
-	current, ok := helper.CurrentUser(c)
-	if !ok {
+	current, err := helper.CurrentUser(c)
+	if err != nil {
 		return helper.Unauthorized("belum terautentikasi")
 	}
 
@@ -39,24 +48,38 @@ func (s *BookingService) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return helper.BadRequest("body harus berupa JSON yang valid (waktu dalam format RFC3339)")
 	}
+
 	req.Purpose = strings.TrimSpace(req.Purpose)
+
 	if errs := helper.ValidateStruct(req); errs != nil {
 		return helper.Validation(errs)
 	}
+
 	if req.RoomID == nil && len(req.Items) == 0 {
-		return helper.Validation(map[string]string{"room_id": "pilih ruang atau minimal satu alat"})
+		return helper.Validation(map[string]string{
+			"room_id": "pilih ruang atau minimal satu alat",
+		})
 	}
+
 	if errs := ValidateWindow(req.StartAt, req.EndAt, time.Now()); errs != nil {
 		return helper.Validation(errs)
+	}
+
+	limit := MaxActiveBookings(current.Role)
+	if limit == 0 {
+		return helper.Unauthorized("role tidak diizinkan mengajukan peminjaman")
 	}
 
 	active, err := s.bookings.CountActiveByUser(ctx, current.UserID)
 	if err != nil {
 		return translate(err)
 	}
-	if limit := MaxActiveBookings(current.Role); active >= limit {
-		return helper.Conflict("BOOKING_LIMIT",
-			fmt.Sprintf("peminjaman aktif sudah mencapai batas (%d)", limit))
+
+	if active >= limit {
+		return helper.Conflict(
+			"BOOKING_LIMIT",
+			fmt.Sprintf("peminjaman aktif sudah mencapai batas (%d)", limit),
+		)
 	}
 
 	if req.RoomID != nil {
@@ -64,43 +87,64 @@ func (s *BookingService) Create(c *fiber.Ctx) error {
 		if err != nil {
 			return translate(err)
 		}
+
 		if !room.IsActive {
 			return helper.Conflict("ROOM_INACTIVE", "ruang sedang tidak dapat dipinjam")
 		}
-		// Pemeriksaan awal supaya peminjam langsung tahu. Penjaga yang
-		// sebenarnya adalah EXCLUDE constraint saat peminjaman disetujui.
-		clash, err := s.bookings.FindApprovedByRoom(ctx, room.ID, req.StartAt, req.EndAt)
+
+		clash, err := s.bookings.FindApprovedByRoom(
+			ctx, room.ID, req.StartAt, req.EndAt,
+		)
 		if err != nil {
 			return translate(err)
 		}
+
 		if len(clash) > 0 {
 			return translate(repository.ErrRoomConflict)
 		}
 	}
+
 	for _, it := range req.Items {
 		item, err := s.items.FindByID(ctx, it.ItemID)
 		if err != nil {
 			return translate(err)
 		}
+
 		if !item.IsActive || it.Quantity > item.Stock {
-			return helper.Conflict("ITEM_UNAVAILABLE",
-				fmt.Sprintf("%s hanya tersedia %d unit", item.Name, item.Stock))
+			return helper.Conflict(
+				"ITEM_UNAVAILABLE",
+				fmt.Sprintf("%s hanya tersedia %d unit", item.Name, item.Stock),
+			)
 		}
 	}
 
-	var created model.Booking
-	err = s.tx.WithTx(ctx, func(tx repository.DBTX) error {
-		var err error
-		created, err = s.bookings.WithTx(tx).Create(ctx, model.Booking{
-			UserID: current.UserID, RoomID: req.RoomID, Purpose: req.Purpose,
-			StartAt: req.StartAt, EndAt: req.EndAt, Items: req.Items,
-		})
-		return err
+	booking := model.Booking{
+		UserID:  current.UserID,
+		RoomID:  req.RoomID,
+		Purpose: req.Purpose,
+		StartAt: req.StartAt,
+		EndAt:   req.EndAt,
+		Status:  model.StatusPending,
+		Items:   req.Items,
+	}
+
+	var created *model.Booking
+
+	err = s.tx.WithTx(ctx, func(txCtx context.Context, tx repository.DBTX) error {
+		var createErr error
+		created, createErr = s.bookings.Create(txCtx, tx, &booking)
+		return createErr
 	})
+
 	if err != nil {
 		return translate(err)
 	}
-	return helper.Created(c, "peminjaman diajukan, menunggu persetujuan laboran", created)
+
+	return helper.Created(
+		c,
+		"peminjaman diajukan, menunggu persetujuan laboran",
+		created,
+	)
 }
 
 // GET /api/v1/bookings/mine
@@ -108,27 +152,77 @@ func (s *BookingService) Mine(c *fiber.Ctx) error {
 	ctx, cancel := helper.RequestContext(c)
 	defer cancel()
 
-	current, ok := helper.CurrentUser(c)
-	if !ok {
+	current, err := helper.CurrentUser(c)
+	if err != nil {
 		return helper.Unauthorized("belum terautentikasi")
 	}
-	list, err := s.bookings.FindAll(ctx, model.BookingQuery{UserID: current.UserID, Status: c.Query("status")})
+
+	list, err := s.bookings.ListByUser(ctx, current.UserID)
 	if err != nil {
 		return translate(err)
 	}
-	return helper.Success(c, fiber.StatusOK, "riwayat peminjaman berhasil diambil", list)
+
+	status := strings.TrimSpace(c.Query("status"))
+	if status != "" {
+		if !validBookingStatus(model.BookingStatus(status)) {
+			return helper.BadRequest("status peminjaman tidak valid")
+		}
+
+		filtered := make([]model.Booking, 0)
+		for _, booking := range list {
+			if booking.Status == model.BookingStatus(status) {
+				filtered = append(filtered, booking)
+			}
+		}
+		list = filtered
+	}
+
+	return helper.Success(
+		c, fiber.StatusOK,
+		"riwayat peminjaman berhasil diambil",
+		list,
+	)
 }
 
-// GET /api/v1/bookings?status=pending (laboran, admin)
+// GET /api/v1/bookings?status=pending
 func (s *BookingService) List(c *fiber.Ctx) error {
 	ctx, cancel := helper.RequestContext(c)
 	defer cancel()
 
-	list, err := s.bookings.FindAll(ctx, model.BookingQuery{Status: c.Query("status")})
+	var status *model.BookingStatus
+
+	queryStatus := strings.TrimSpace(c.Query("status"))
+	if queryStatus != "" {
+		value := model.BookingStatus(queryStatus)
+		if !validBookingStatus(value) {
+			return helper.BadRequest("status peminjaman tidak valid")
+		}
+		status = &value
+	}
+
+	list, err := s.bookings.ListAll(ctx, status)
 	if err != nil {
 		return translate(err)
 	}
-	return helper.Success(c, fiber.StatusOK, "daftar peminjaman berhasil diambil", list)
+
+	return helper.Success(
+		c, fiber.StatusOK,
+		"daftar peminjaman berhasil diambil",
+		list,
+	)
+}
+
+func validBookingStatus(status model.BookingStatus) bool {
+	switch status {
+	case model.StatusPending,
+		model.StatusApproved,
+		model.StatusRejected,
+		model.StatusCancelled,
+		model.StatusReturned:
+		return true
+	default:
+		return false
+	}
 }
 
 // GET /api/v1/bookings/:id
@@ -136,124 +230,138 @@ func (s *BookingService) Get(c *fiber.Ctx) error {
 	ctx, cancel := helper.RequestContext(c)
 	defer cancel()
 
-	current, ok := helper.CurrentUser(c)
-	if !ok {
+	current, err := helper.CurrentUser(c)
+	if err != nil {
 		return helper.Unauthorized("belum terautentikasi")
 	}
+
 	id, valid := helper.ParamID(c)
 	if !valid {
 		return helper.BadRequest("id harus berupa angka positif")
 	}
+
 	b, err := s.bookings.FindByID(ctx, id)
 	if err != nil {
 		return translate(err)
 	}
+
 	if !CanViewBooking(current, b.UserID) {
-		// 404, bukan 403: keberadaan peminjaman orang lain tidak dibocorkan.
 		return helper.NotFound("data tidak ditemukan")
 	}
-	return helper.Success(c, fiber.StatusOK, "detail peminjaman berhasil diambil", b)
+
+	return helper.Success(
+		c, fiber.StatusOK,
+		"detail peminjaman berhasil diambil",
+		b,
+	)
 }
 
-// PATCH /api/v1/bookings/:id/approve (laboran, admin)
-func (s *BookingService) Approve(c *fiber.Ctx) error { return s.review(c, model.StatusApproved) }
+func (s *BookingService) Approve(c *fiber.Ctx) error {
+	return s.review(c, model.StatusApproved)
+}
 
-// PATCH /api/v1/bookings/:id/reject (laboran, admin)
-func (s *BookingService) Reject(c *fiber.Ctx) error { return s.review(c, model.StatusRejected) }
+func (s *BookingService) Reject(c *fiber.Ctx) error {
+	return s.review(c, model.StatusRejected)
+}
 
-// PATCH /api/v1/bookings/:id/cancel (pemilik)
-func (s *BookingService) Cancel(c *fiber.Ctx) error { return s.review(c, model.StatusCancelled) }
+func (s *BookingService) Cancel(c *fiber.Ctx) error {
+	return s.review(c, model.StatusCancelled)
+}
 
-// PATCH /api/v1/bookings/:id/return (laboran, admin)
-func (s *BookingService) Return(c *fiber.Ctx) error { return s.review(c, model.StatusReturned) }
+func (s *BookingService) Return(c *fiber.Ctx) error {
+	return s.review(c, model.StatusReturned)
+}
 
-// review menjalankan satu perpindahan status di dalam transaction.
-func (s *BookingService) review(c *fiber.Ctx, to string) error {
+// review menjalankan perubahan status di dalam transaksi.
+func (s *BookingService) review(c *fiber.Ctx, to model.BookingStatus) error {
 	ctx, cancel := helper.RequestContext(c)
 	defer cancel()
 
-	current, ok := helper.CurrentUser(c)
-	if !ok {
+	current, err := helper.CurrentUser(c)
+	if err != nil {
 		return helper.Unauthorized("belum terautentikasi")
 	}
+
 	id, valid := helper.ParamID(c)
 	if !valid {
 		return helper.BadRequest("id harus berupa angka positif")
 	}
-	var req model.ReviewRequest
-	_ = c.BodyParser(&req) // catatan bersifat opsional
+
+	var req struct {
+		Note string `json:"note"`
+	}
+
+	_ = c.BodyParser(&req)
+
 	var note *string
 	if n := strings.TrimSpace(req.Note); n != "" {
 		note = &n
 	}
 
 	var result model.Booking
-	err := s.tx.WithTx(ctx, func(tx repository.DBTX) error {
-		bookings := s.bookings.WithTx(tx)
 
-		b, err := bookings.FindByIDForUpdate(ctx, id)
+	err = s.tx.WithTx(ctx, func(txCtx context.Context, tx repository.DBTX) error {
+		b, err := s.bookings.FindByIDForUpdate(txCtx, tx, id)
 		if err != nil {
 			return err
 		}
+
 		if to == model.StatusCancelled && b.UserID != current.UserID {
 			return helper.NotFound("data tidak ditemukan")
 		}
+
 		if !CanTransition(b.Status, to) {
-			return helper.Conflict("INVALID_STATUS",
-				fmt.Sprintf("peminjaman berstatus %s tidak dapat diubah menjadi %s", b.Status, to))
+			return helper.Conflict(
+				"INVALID_STATUS",
+				fmt.Sprintf(
+					"peminjaman berstatus %s tidak dapat diubah menjadi %s",
+					b.Status, to,
+				),
+			)
 		}
+
 		if to == model.StatusApproved {
-			if err := s.ensureStock(ctx, tx, b); err != nil {
+			if err := s.bookings.LockAndCheckItems(
+				txCtx, tx, b.Items, b.StartAt, b.EndAt,
+			); err != nil {
 				return err
 			}
 		}
 
-		if to == model.StatusReturned {
-			result, err = bookings.MarkReturned(ctx, id)
-		} else {
-			var reviewer *int
-			if to != model.StatusCancelled {
-				reviewer = &current.UserID
-			}
-			result, err = bookings.UpdateStatus(ctx, id, to, reviewer, note)
+		var reviewer *int
+		if to != model.StatusCancelled {
+			reviewer = &current.UserID
 		}
-		result.Items = b.Items
-		return err
+
+		var returnedAt *time.Time
+		if to == model.StatusReturned {
+			now := time.Now()
+			returnedAt = &now
+		}
+
+		if err := s.bookings.UpdateStatus(
+			txCtx, tx, id, to, reviewer, note, returnedAt,
+		); err != nil {
+			return err
+		}
+
+		b.Status = to
+		b.ReviewedBy = reviewer
+		b.ReviewNote = note
+		b.ReturnedAt = returnedAt
+
+		result = *b
+		return nil
 	})
+
 	if err != nil {
 		return translate(err)
 	}
-	return helper.Success(c, fiber.StatusOK, "status peminjaman menjadi "+to, result)
-}
 
-// ensureStock memastikan setiap alat masih cukup pada rentang waktu
-// peminjaman. Baris alat dikunci dulu supaya dua persetujuan bersamaan
-// tidak sama-sama lolos.
-func (s *BookingService) ensureStock(ctx context.Context, tx repository.DBTX, b model.Booking) error {
-	if len(b.Items) == 0 {
-		return nil
-	}
-	items := s.items.WithTx(tx)
-	ids := make([]int, 0, len(b.Items))
-	for _, it := range b.Items {
-		ids = append(ids, it.ItemID)
-	}
-	if err := items.LockForUpdate(ctx, ids); err != nil {
-		return err
-	}
-	for _, it := range b.Items {
-		item, err := items.FindByID(ctx, it.ItemID)
-		if err != nil {
-			return err
-		}
-		borrowed, err := items.BorrowedQuantity(ctx, it.ItemID, b.StartAt, b.EndAt)
-		if err != nil {
-			return err
-		}
-		if borrowed+it.Quantity > item.Stock {
-			return helper.Conflict("ITEM_UNAVAILABLE",
-				fmt.Sprintf("%s tersisa %d unit pada waktu tersebut", item.Name, item.Stock-borrowed))
-		}
-	}
-	return nil
+	return helper.Success(
+		c,
+		fiber.StatusOK,
+		"status peminjaman menjadi "+string(to),
+		result,
+	)
 }

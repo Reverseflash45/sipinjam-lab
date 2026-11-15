@@ -21,6 +21,7 @@ func TestValidateWindow(t *testing.T) {
 		{"selesai sebelum mulai", now.Add(3 * time.Hour), now.Add(2 * time.Hour), "end_at"},
 		{"lebih dari 30 hari", now.AddDate(0, 0, 31), now.AddDate(0, 0, 31).Add(time.Hour), "start_at"},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			errs := ValidateWindow(tt.start, tt.end, now)
@@ -38,7 +39,7 @@ func TestValidateWindow(t *testing.T) {
 
 func TestCanTransition(t *testing.T) {
 	tests := []struct {
-		from, to string
+		from, to model.BookingStatus
 		want     bool
 	}{
 		{model.StatusPending, model.StatusApproved, true},
@@ -48,6 +49,7 @@ func TestCanTransition(t *testing.T) {
 		{model.StatusRejected, model.StatusApproved, false},
 		{model.StatusReturned, model.StatusApproved, false},
 	}
+
 	for _, tt := range tests {
 		if got := CanTransition(tt.from, tt.to); got != tt.want {
 			t.Errorf("CanTransition(%s, %s) = %v, seharusnya %v", tt.from, tt.to, got, tt.want)
@@ -66,6 +68,7 @@ func TestCanViewBooking(t *testing.T) {
 	owner := model.AuthUser{UserID: 7, Role: model.RoleMahasiswa}
 	other := model.AuthUser{UserID: 8, Role: model.RoleMahasiswa}
 	laboran := model.AuthUser{UserID: 2, Role: model.RoleLaboran}
+
 	if !CanViewBooking(owner, 7) || CanViewBooking(other, 7) || !CanViewBooking(laboran, 7) {
 		t.Error("aturan melihat peminjaman tidak sesuai")
 	}
